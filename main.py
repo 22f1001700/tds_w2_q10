@@ -1,12 +1,16 @@
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.middleware.base import BaseHTTPMiddleware
 
 import uuid
 import time
 
 app = FastAPI()
 
+# ----------------------------
+# CORS
+# ----------------------------
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
@@ -18,46 +22,77 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# ----------------------------
+# Rate Limiter
+# ----------------------------
 RATE_LIMIT = 9
-WINDOW = 10
+WINDOW = 10  # seconds
 clients = {}
 
-@app.middleware("http")
-async def rate_limiter(request: Request, call_next):
-    client_id = request.headers.get("X-Client-Id", "anonymous")
-    now = time.time()
 
-    timestamps = clients.get(client_id, [])
-    timestamps = [t for t in timestamps if now - t < WINDOW]
+class RateLimitMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
 
-    if len(timestamps) >= RATE_LIMIT:
-        return JSONResponse(
-            status_code=429,
-            content={"detail": "Rate limit exceeded"},
+        # Don't rate-limit CORS preflight requests
+        if request.method == "OPTIONS":
+            return await call_next(request)
+
+        client_id = request.headers.get("X-Client-Id", "anonymous")
+        now = time.time()
+
+        timestamps = clients.get(client_id, [])
+
+        # Keep only timestamps within the window
+        timestamps = [t for t in timestamps if now - t < WINDOW]
+
+        if len(timestamps) >= RATE_LIMIT:
+            request_id = (
+                request.headers.get("X-Request-ID")
+                or str(uuid.uuid4())
+            )
+
+            response = JSONResponse(
+                status_code=429,
+                content={
+                    "detail": "Rate limit exceeded",
+                    "request_id": request_id,
+                },
+            )
+
+            response.headers["X-Request-ID"] = request_id
+            return response
+
+        timestamps.append(now)
+        clients[client_id] = timestamps
+
+        return await call_next(request)
+
+
+# ----------------------------
+# Request Context
+# ----------------------------
+class RequestContextMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+
+        request_id = (
+            request.headers.get("X-Request-ID")
+            or str(uuid.uuid4())
         )
 
-    timestamps.append(now)
-    clients[client_id] = timestamps
+        request.state.request_id = request_id
 
-    response = await call_next(request)
+        response = await call_next(request)
 
-    return response
+        response.headers["X-Request-ID"] = request_id
 
-@app.middleware("http")
-async def request_context(request: Request, call_next):
-    request_id = request.headers.get("X-Request-ID")
+        return response
 
-    if not request_id:
-        request_id = str(uuid.uuid4())
 
-    request.state.request_id = request_id
-
-    response = await call_next(request)
-
-    response.headers["X-Request-ID"] = request_id
-
-    return response
-
+# IMPORTANT:
+# RequestContext is OUTERMOST.
+# BaseHTTPMiddleware executes in reverse order.
+app.add_middleware(RateLimitMiddleware)
+app.add_middleware(RequestContextMiddleware)
 
 
 @app.get("/ping")
