@@ -23,21 +23,6 @@ WINDOW = 10
 clients = {}
 
 @app.middleware("http")
-async def request_context(request: Request, call_next):
-    request_id = request.headers.get("X-Request-ID")
-
-    if not request_id:
-        request_id = str(uuid.uuid4())
-
-    request.state.request_id = request_id
-
-    response = await call_next(request)
-
-    response.headers["X-Request-ID"] = request_id
-
-    return response
-
-@app.middleware("http")
 async def rate_limiter(request: Request, call_next):
     client_id = request.headers.get("X-Client-Id", "anonymous")
     now = time.time()
@@ -57,6 +42,23 @@ async def rate_limiter(request: Request, call_next):
     response = await call_next(request)
 
     return response
+
+@app.middleware("http")
+async def request_context(request: Request, call_next):
+    request_id = request.headers.get("X-Request-ID")
+
+    if not request_id:
+        request_id = str(uuid.uuid4())
+
+    request.state.request_id = request_id
+
+    response = await call_next(request)
+
+    response.headers["X-Request-ID"] = request_id
+
+    return response
+
+
 
 @app.get("/ping")
 async def ping(request: Request):
